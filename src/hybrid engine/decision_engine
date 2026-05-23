@@ -1,0 +1,253 @@
+"""
+decision_engine.py
+------------------
+Hybrid Decision Engine — integrates GA, ACO, CatBoost, and Q-learning
+to compute optimal routing decisions.
+
+Implements Section 5.5 and Equation (7) of the paper:
+
+    Score(R_k) = w₁·QoS + w₂·Pheromone + w₃·P_cong_inv + w₄·Q_value
+
+where P_cong_inv = 1 - P_cong (lower congestion → higher score).
+"""
+
+import numpy as np
+import networkx as nx
+from typing import List, Dict, Tuple
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
+from ga_aco.genetic_algorithm import GeneticAlgorithm
+from ga_aco.ant_colony import AntColonyOptimization
+from catboost_predictor.predict_congestion import CongestionPredictor
+from q_learning.q_agent import QAgent
+from utils.network_graph import compute_path_qos
+
+
+class HybridDecisionEngine:
+    """
+    Orchestrates all four components to select the optimal routing path.
+
+    Parameters
+    ----------
+    G : nx.DiGraph
+        Network graph
+    source : int
+    target : int
+    catboost_model_path : str
+    weights : dict
+        {'qos': w1, 'pheromone': w2, 'p_cong': w3, 'q_value': w4}
+    ga_params : dict
+    aco_params : dict
+    ql_params : dict
+    seed : int
+    """
+
+    def __init__(self,
+                 G: nx.DiGraph,
+                 source: int,
+                 target: int,
+                 catboost_model_path: str = 'results/models/catboost_model.pkl',
+                 weights: dict = None,
+                 ga_params: dict = None,
+                 aco_params: dict = None,
+                 ql_params: dict = None,
+                 seed: int = 42):
+
+        self.G       = G
+        self.source  = source
+        self.target  = target
+        self.seed    = seed
+
+        # Decision weights (Eq. 7)
+        self.weights = weights or {
+            'qos':      0.3,
+            'pheromone':0.2,
+            'p_cong':   0.3,
+            'q_value':  0.2,
+        }
+
+        # Initialize components
+        ga_p  = ga_params  or {}
+        aco_p = aco_params or {}
+        ql_p  = ql_params  or {}
+
+        self.ga  = GeneticAlgorithm(G, source, target, seed=seed, **ga_p)
+        self.aco = AntColonyOptimization(G, seed=seed, **aco_p)
+
+        # Q-agents at each node
+        self.q_agents: Dict[int, QAgent] = {
+            node: QAgent(node, G, seed=seed, **ql_p)
+            for node in G.nodes()
+        }
+
+        # CatBoost predictor
+        self.predictor = None
+        if os.path.exists(catboost_model_path):
+            self.predictor = CongestionPredictor(catboost_model_path)
+        else:
+            print(f"[WARNING] CatBoost model not found at {catboost_model_path}. "
+                  f"Using heuristic congestion estimation.")
+
+    # ── Congestion prediction ─────────────────────────────────────────────────
+
+    def _predict_congestion(self, path: list) -> float:
+        """
+        Predict P_cong using CatBoost or fallback heuristic.
+        """
+        if self.predictor:
+            return self.predictor.predict_from_graph(self.G, path)
+
+        # Fallback: heuristic based on queue occupancy
+        qos = compute_path_qos(self.G, path)
+        return float(np.clip(
+            0.5 * qos.get('queue_occ', 0) + 0.5 * qos.get('loss_prob', 0), 0, 1
+        ))
+
+    # ── QoS scoring ───────────────────────────────────────────────────────────
+
+    def _compute_qos_score(self, path: list) -> float:
+        """
+        Normalized QoS score from path attributes.
+        Higher = better path.
+        """
+        qos = compute_path_qos(self.G, path)
+        if not qos:
+            return 0.0
+
+        T   = min(qos['bandwidth']  / 100.0, 1.0)
+        PDR = 1.0 - qos['loss_prob']
+        D   = 1.0 - min(qos['delay'] / 500.0, 1.0)
+        Q   = 1.0 - qos['queue_occ']
+
+        return 0.4*T + 0.3*PDR + 0.2*D + 0.1*Q
+
+    # ── Pheromone score ───────────────────────────────────────────────────────
+
+    def _compute_pheromone_score(self, path: list) -> float:
+        """
+        Mean normalized pheromone intensity along path.
+        """
+        pheromones = []
+        for i in range(len(path) - 1):
+            u, v = path[i], path[i+1]
+            pheromones.append(self.aco.pheromone.get((u, v), 0.0))
+
+        if not pheromones:
+            return 0.0
+
+        max_phe = max(self.aco.pheromone.values()) if self.aco.pheromone else 1.0
+        return np.mean(pheromones) / (max_phe + 1e-9)
+
+    # ── Q-value scoring ───────────────────────────────────────────────────────
+
+    def _compute_q_score(self, path: list) -> float:
+        """
+        Mean Q-value along path nodes.
+        """
+        q_scores = []
+        for node in path[:-1]:
+            if node in self.q_agents:
+                state = self.q_agents[node].get_state()
+                _, q_norm = self.q_agents[node].get_best_action_qvalue(state)
+                q_scores.append(q_norm)
+
+        return np.mean(q_scores) if q_scores else 0.5
+
+    # ── Main decision procedure (Algorithm 1) ─────────────────────────────────
+
+    def select_route(self) -> Tuple[list, dict]:
+        """
+        Execute Algorithm 1: Hybrid Congestion Control Decision Procedure.
+
+        Returns
+        -------
+        best_path : list of node IDs
+        scores : dict with Score components for all candidates
+        """
+        # Step 2: Predict congestion for current network state
+        # (use a reference path for initial prediction)
+        try:
+            import networkx as nx
+            ref_path = nx.shortest_path(self.G, self.source, self.target,
+                                         weight='delay')
+        except nx.NetworkXNoPath:
+            return [], {}
+
+        p_cong = self._predict_congestion(ref_path)
+
+        # Step 3–4: GA evolution with p_cong-adjusted mutation
+        c_ga = self.ga.evolve(p_cong=p_cong)
+
+        # Step 5–6: ACO refinement
+        c_star = self.aco.refine(c_ga, self.source, self.target,
+                                  p_cong=p_cong)
+
+        # Step 7: Score each candidate path
+        all_scores = {}
+        for path in c_star:
+            if len(path) < 2:
+                continue
+
+            qos_score  = self._compute_qos_score(path)
+            phe_score  = self._compute_pheromone_score(path)
+            p_cong_inv = 1.0 - self._predict_congestion(path)   # invert: lower cong = higher score
+            q_score    = self._compute_q_score(path)
+
+            w = self.weights
+            composite = (w['qos']      * qos_score  +
+                         w['pheromone'] * phe_score  +
+                         w['p_cong']   * p_cong_inv +
+                         w['q_value']  * q_score)
+
+            all_scores[tuple(path)] = {
+                'composite': composite,
+                'qos':       qos_score,
+                'pheromone': phe_score,
+                'p_cong_inv':p_cong_inv,
+                'q_value':   q_score,
+            }
+
+        if not all_scores:
+            return ref_path, {}
+
+        # Step 8: Select R* = argmax Score(R_k)
+        best_path_key = max(all_scores, key=lambda k: all_scores[k]['composite'])
+        best_path     = list(best_path_key)
+
+        # Step 9: Update Q-tables with reward feedback
+        self._update_q_agents(best_path)
+
+        return best_path, all_scores
+
+    def _update_q_agents(self, path: list):
+        """
+        Update Q-tables along selected path (Step 9 of Algorithm 1).
+        """
+        for i in range(len(path) - 1):
+            node   = path[i]
+            action = path[i + 1]
+
+            if node not in self.q_agents:
+                continue
+            if action not in self.q_agents[node].actions:
+                continue
+
+            agent      = self.q_agents[node]
+            state      = agent.get_state()
+
+            # Compute reward from edge attributes
+            edge       = self.G[node][action]
+            reward     = agent.compute_reward(
+                prev_throughput=edge['bandwidth'] * 0.7,
+                curr_throughput=edge['bandwidth'] * (1 - edge['queue_occ']),
+                delay=edge['delay'],
+                loss=edge['loss_prob'],
+            )
+
+            # Observe next state
+            next_agent = self.q_agents.get(action)
+            next_state = next_agent.get_state() if next_agent else state
+
+            agent.update(state, action, reward, next_state)
