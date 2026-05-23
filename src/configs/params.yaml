@@ -1,0 +1,103 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Hybrid Congestion Control Framework — Configuration Parameters
+# All values match the experimental setup described in the paper (Section 7)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Genetic Algorithm ─────────────────────────────────────────────────────────
+ga:
+  population_size: 50
+  generations: 100
+  crossover_probability: 0.7
+  mutation_probability: 0.1
+  mutation_probability_max: 0.25      # upper bound during high congestion
+  mutation_increment: 0.05            # added when P_cong >= 0.7
+  elite_size: 5
+  tournament_size: 3
+
+# ── Ant Colony Optimization ───────────────────────────────────────────────────
+aco:
+  num_ants: 20
+  pheromone_evaporation: 0.3          # rho
+  pheromone_init: 1.0
+  alpha: 1.0                          # pheromone importance
+  beta: 2.0                           # heuristic importance
+  q_constant: 100.0                   # pheromone deposit quantity
+
+# ── CatBoost Congestion Predictor ─────────────────────────────────────────────
+catboost:
+  num_trees: 500
+  learning_rate: 0.05
+  max_depth: 8
+  train_val_split: 0.75               # 75% train, 25% validation
+  random_seed: 42
+  congestion_thresholds:
+    normal: 0.3                       # P_cong < 0.3
+    moderate_low: 0.3                 # 0.3 <= P_cong < 0.7
+    critical: 0.7                     # P_cong >= 0.7
+
+# ── Q-Learning ────────────────────────────────────────────────────────────────
+q_learning:
+  learning_rate: 0.2                  # alpha
+  discount_factor: 0.8                # gamma
+  epsilon_start: 1.0                  # exploration rate start
+  epsilon_min: 0.01
+  epsilon_decay: 0.995
+  reward_weights:
+    throughput_gain: 1.0              # beta_1
+    delay_penalty: 0.5                # beta_2
+    loss_penalty: 0.8                 # beta_3
+
+# ── Hybrid Decision Engine ────────────────────────────────────────────────────
+decision_engine:
+  weights:
+    qos: 0.3                          # w1
+    pheromone: 0.2                    # w2
+    p_cong: 0.3                       # w3
+    q_value: 0.2                      # w4
+
+# ── Objective Function Weights (Eq. 1) ───────────────────────────────────────
+objective:
+  alpha_throughput: 0.3               # alpha_1
+  alpha_pdr: 0.25                     # alpha_2
+  alpha_delay: 0.2                    # alpha_3
+  alpha_loss: 0.15                    # alpha_4
+  alpha_energy: 0.1                   # alpha_5
+
+# ── Network Topology ──────────────────────────────────────────────────────────
+topology:
+  types: [grid, random, scale_free]
+  node_counts: [100, 150, 200, 512]
+  communication_range_m: 250
+  packet_size_min_bytes: 256
+  packet_size_max_bytes: 1024
+  mobility_model: random_waypoint
+  min_speed_mps: 1.0
+  max_speed_mps: 5.0
+
+# ── Traffic Generation ────────────────────────────────────────────────────────
+traffic:
+  types: [cbr, poisson]
+  protocols: [udp, tcp]
+  cbr_rate_mbps: 5.0
+  poisson_lambda: 100                 # packets per second
+
+# ── Simulation ────────────────────────────────────────────────────────────────
+simulation:
+  num_runs: 20                        # independent random seeds
+  duration_seconds: 300
+  warmup_seconds: 30
+  random_seeds: [42, 43, 44, 45, 46, 47, 48, 49, 50, 51,
+                 52, 53, 54, 55, 56, 57, 58, 59, 60, 61]
+
+# ── Congestion Constraints ────────────────────────────────────────────────────
+constraints:
+  queue_max_occupancy: 0.9            # Q_max (Eq. 3)
+  congestion_threshold: 0.7          # theta (Eq. 4)
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output:
+  results_dir: results/
+  figures_dir: results/figures/
+  tables_dir: results/tables/
+  save_models: true
+  model_dir: results/models/
