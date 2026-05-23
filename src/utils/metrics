@@ -1,0 +1,124 @@
+"""
+metrics.py
+----------
+QoS performance metrics computation for experimental evaluation.
+Metrics match Table 4–8 in the paper (Section 8).
+"""
+
+import numpy as np
+from typing import List, Dict
+from scipy import stats
+
+
+def compute_throughput(bandwidth_list: list, utilization_list: list) -> float:
+    """Average throughput in Mbps."""
+    return float(np.mean([b * u for b, u in zip(bandwidth_list, utilization_list)]))
+
+
+def compute_pdr(delivered: int, sent: int) -> float:
+    """Packet Delivery Ratio (%)."""
+    return 100.0 * delivered / max(sent, 1)
+
+
+def compute_packet_loss(sent: int, delivered: int) -> float:
+    """Packet Loss Rate (%)."""
+    return 100.0 * (sent - delivered) / max(sent, 1)
+
+
+def compute_latency(delay_samples: list) -> float:
+    """Mean end-to-end latency (ms)."""
+    return float(np.mean(delay_samples))
+
+
+def compute_recovery_time(congestion_start: float,
+                           recovery_end: float) -> float:
+    """Congestion recovery time (seconds)."""
+    return max(recovery_end - congestion_start, 0.0)
+
+
+def compute_all_metrics(run_results: List[Dict]) -> Dict:
+    """
+    Aggregate metrics across N simulation runs.
+
+    Parameters
+    ----------
+    run_results : list of dicts, each with keys:
+        throughput, pdr, packet_loss, latency, recovery_time
+
+    Returns
+    -------
+    dict with mean and 95% CI for each metric
+    """
+    metrics = ['throughput', 'pdr', 'packet_loss', 'latency', 'recovery_time']
+    aggregated = {}
+
+    for m in metrics:
+        values = [r[m] for r in run_results if m in r]
+        if not values:
+            continue
+        mean = np.mean(values)
+        sem  = stats.sem(values)
+        ci95 = sem * stats.t.ppf(0.975, df=len(values)-1) if len(values) > 1 else 0.0
+        aggregated[m] = {
+            'mean':   round(mean, 2),
+            'ci95':   round(ci95, 2),
+            'std':    round(np.std(values), 2),
+            'values': values,
+        }
+
+    return aggregated
+
+
+def run_anova_tukey(group_results: Dict[str, List[float]],
+                    metric: str = 'throughput') -> Dict:
+    """
+    One-way ANOVA + Tukey HSD post-hoc test (Section 8.6).
+
+    Parameters
+    ----------
+    group_results : dict {method_name: [values across runs]}
+    metric : str
+
+    Returns
+    -------
+    dict with F-statistic, p-value, and pairwise significance
+    """
+    from statsmodels.stats.multicomp import pairwise_tukeyhsd
+    import pandas as pd
+
+    groups  = list(group_results.keys())
+    values  = list(group_results.values())
+
+    # ANOVA
+    f_stat, p_val = stats.f_oneway(*values)
+
+    # Tukey HSD
+    all_values  = []
+    all_labels  = []
+    for method, vals in group_results.items():
+        all_values.extend(vals)
+        all_labels.extend([method] * len(vals))
+
+    tukey = pairwise_tukeyhsd(all_values, all_labels, alpha=0.01)
+
+    return {
+        'metric':   metric,
+        'f_stat':   round(f_stat, 2),
+        'p_value':  p_val,
+        'significant': p_val < 0.01,
+        'df':       f'F({len(groups)-1},{sum(len(v) for v in values)-len(groups)})',
+        'tukey_summary': str(tukey),
+    }
+
+
+def compute_resource_metrics(cpu_samples: list,
+                              memory_samples: list,
+                              inference_samples: list,
+                              energy_samples: list) -> Dict:
+    """Compute resource utilization metrics (Table 7 in paper)."""
+    return {
+        'cpu_util_pct':   round(np.mean(cpu_samples), 1),
+        'memory_mb':      round(np.mean(memory_samples), 1),
+        'inference_ms':   round(np.mean(inference_samples), 1),
+        'energy_joules':  round(np.mean(energy_samples), 1),
+    }
