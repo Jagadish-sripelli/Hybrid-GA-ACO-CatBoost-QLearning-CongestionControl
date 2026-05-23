@@ -1,0 +1,87 @@
+# Datasets
+
+This directory contains traffic datasets used in the paper experiments (Section 7.3).
+
+---
+
+## Directory Structure
+
+```
+datasets/
+├── synthetic/          ← Auto-generated (run traffic_generator.py)
+├── caida_sample/       ← Place CAIDA traces here (see below)
+└── mawi_sample/        ← Place MAWI traces here (see below)
+```
+
+---
+
+## 1. Synthetic Datasets (included)
+
+Generated automatically using `src/utils/traffic_generator.py`.
+
+Run:
+```bash
+python src/utils/traffic_generator.py
+```
+
+This creates:
+- `traffic_cbr_5mbps.csv`   — Constant Bit Rate at 5 Mbps
+- `traffic_cbr_10mbps.csv`  — Constant Bit Rate at 10 Mbps
+- `traffic_poisson_100.csv` — Poisson bursty, λ=100 pps
+- `traffic_poisson_200.csv` — Poisson bursty, λ=200 pps
+
+---
+
+## 2. CAIDA Dataset (requires registration)
+
+**Source:** https://www.caida.org/catalog/datasets/passive_dataset/
+
+**Steps to download:**
+1. Register at https://www.caida.org/home/about/policies/aup/
+2. Request access to the "Passive OC48" or "Anonymized Internet Traces" dataset
+3. Download `.pcap` files
+4. Place them in `datasets/caida_sample/`
+
+**Format used in paper:**
+- Anonymized packet traces (OC48 link)
+- Used for trace-driven simulation in NS-3
+
+---
+
+## 3. MAWI Dataset (free, no registration)
+
+**Source:** http://mawi.wide.ad.jp/mawi/
+
+**Steps to download:**
+```bash
+# Example: download a specific date's trace
+wget http://mawi.wide.ad.jp/mawi/samplepoint-F/2023/202301011400.dump.gz
+gunzip 202301011400.dump.gz
+mv 202301011400.dump datasets/mawi_sample/
+```
+
+**Format used in paper:**
+- Daily traffic dumps from WIDE backbone
+- Used for real-world congestion pattern validation
+
+---
+
+## Feature Extraction from PCAP
+
+To extract the 18 features used by CatBoost from raw PCAP files:
+
+```bash
+pip install scapy
+python datasets/extract_features_from_pcap.py --input datasets/caida_sample/ --output datasets/caida_features.csv
+```
+
+---
+
+## Dataset Summary (from paper Table — Section 7.3)
+
+| Dataset | Type | Packets | Used For |
+|---|---|---|---|
+| CBR Synthetic | Controlled | ~450,000 | Baseline experiments |
+| Poisson Synthetic | Bursty | ~600,000 | Congestion events |
+| CAIDA OC48 | Real-world | ~millions | Trace-driven NS-3 |
+| MAWI WIDE | Real-world | ~millions | Long-range dependency |
