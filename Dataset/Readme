@@ -55,7 +55,7 @@ This creates:
 **Steps to download:**
 ```bash
 # Example: download a specific date's trace
-wget http://mawi.wide.ad.jp/mawi/samplepoint-F/2023/202301011400.dump.gz
+wget http://mawi.wide.ad.jp/mawi/samplepoint-F/2023/
 gunzip 202301011400.dump.gz
 mv 202301011400.dump datasets/mawi_sample/
 ```
