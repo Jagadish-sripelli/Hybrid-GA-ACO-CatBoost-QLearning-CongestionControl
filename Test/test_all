@@ -1,0 +1,220 @@
+"""
+test_all.py
+-----------
+Unit tests for all framework components.
+Run: pytest tests/test_all.py -v
+"""
+
+import pytest
+import numpy as np
+import sys
+import os
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+from utils.network_graph import (
+    create_topology, compute_path_qos, get_all_paths, update_edge_state
+)
+from utils.metrics import (
+    compute_throughput, compute_pdr, compute_packet_loss,
+    compute_latency, compute_all_metrics
+)
+from ga_aco.genetic_algorithm import GeneticAlgorithm
+from ga_aco.ant_colony import AntColonyOptimization
+from q_learning.q_agent import QAgent
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def grid_graph():
+    return create_topology('grid', 25, seed=42)
+
+@pytest.fixture
+def random_graph():
+    return create_topology('random', 30, seed=42)
+
+@pytest.fixture
+def scale_free_graph():
+    return create_topology('scale_free', 30, seed=42)
+
+
+# ── Network Graph Tests ───────────────────────────────────────────────────────
+
+class TestNetworkGraph:
+
+    def test_grid_topology_nodes(self, grid_graph):
+        assert len(grid_graph.nodes) == 25
+
+    def test_random_topology_connected(self, random_graph):
+        import networkx as nx
+        assert nx.is_weakly_connected(random_graph)
+
+    def test_scale_free_topology_created(self, scale_free_graph):
+        assert len(scale_free_graph.nodes) == 30
+
+    def test_edge_attributes(self, grid_graph):
+        for u, v in grid_graph.edges():
+            edge = grid_graph[u][v]
+            assert 'bandwidth'  in edge
+            assert 'delay'      in edge
+            assert 'loss_prob'  in edge
+            assert 'queue_occ'  in edge
+            assert 'energy'     in edge
+            assert edge['bandwidth'] > 0
+            assert 0 <= edge['queue_occ'] <= 1
+
+    def test_path_qos(self, grid_graph):
+        paths = get_all_paths(grid_graph, 0, 24, cutoff=4)
+        assert len(paths) > 0
+        qos = compute_path_qos(grid_graph, paths[0])
+        assert 'bandwidth' in qos
+        assert 'delay'     in qos
+        assert 'loss_prob' in qos
+        assert qos['delay'] >= 0
+
+    def test_update_edge_state(self, grid_graph):
+        edges  = list(grid_graph.edges())[:3]
+        rng    = np.random.RandomState(42)
+        before = grid_graph[edges[0][0]][edges[0][1]]['queue_occ']
+        G2     = update_edge_state(grid_graph, edges, rng)
+        after  = G2[edges[0][0]][edges[0][1]]['queue_occ']
+        assert after >= before  # congested edges should increase queue
+
+
+# ── Metrics Tests ─────────────────────────────────────────────────────────────
+
+class TestMetrics:
+
+    def test_throughput(self):
+        tp = compute_throughput([10.0, 20.0], [0.5, 0.8])
+        assert tp == pytest.approx(11.0)
+
+    def test_pdr_perfect(self):
+        assert compute_pdr(1000, 1000) == 100.0
+
+    def test_pdr_partial(self):
+        assert compute_pdr(900, 1000) == pytest.approx(90.0)
+
+    def test_packet_loss(self):
+        assert compute_packet_loss(1000, 900) == pytest.approx(10.0)
+
+    def test_latency(self):
+        assert compute_latency([10, 20, 30]) == pytest.approx(20.0)
+
+    def test_aggregate_metrics(self):
+        runs = [
+            {'throughput': 10.0, 'pdr': 90.0, 'packet_loss': 10.0,
+             'latency': 50.0, 'recovery_time': 15.0},
+            {'throughput': 11.0, 'pdr': 91.0, 'packet_loss': 9.0,
+             'latency': 48.0, 'recovery_time': 14.0},
+        ]
+        agg = compute_all_metrics(runs)
+        assert 'throughput' in agg
+        assert agg['throughput']['mean'] == pytest.approx(10.5)
+        assert 'ci95' in agg['throughput']
+
+
+# ── Genetic Algorithm Tests ───────────────────────────────────────────────────
+
+class TestGeneticAlgorithm:
+
+    def test_ga_returns_paths(self, grid_graph):
+        ga   = GeneticAlgorithm(grid_graph, source=0, target=24, seed=42,
+                                 population_size=10, generations=5)
+        paths = ga.evolve()
+        assert len(paths) > 0
+        assert all(isinstance(p, list) for p in paths)
+
+    def test_ga_paths_valid(self, grid_graph):
+        ga    = GeneticAlgorithm(grid_graph, source=0, target=24, seed=42,
+                                  population_size=10, generations=5)
+        paths = ga.evolve()
+        for p in paths:
+            assert p[0] == 0
+            assert p[-1] == 24
+
+    def test_ga_fitness_positive(self, grid_graph):
+        ga      = GeneticAlgorithm(grid_graph, source=0, target=24, seed=42)
+        paths   = get_all_paths(grid_graph, 0, 24, cutoff=4)
+        fitness = ga.fitness(paths[0])
+        assert isinstance(fitness, float)
+
+    def test_ga_high_congestion_increases_mutation(self, grid_graph):
+        ga = GeneticAlgorithm(grid_graph, source=0, target=24, seed=42,
+                               population_size=10, generations=3)
+        # Should not raise with high P_cong
+        paths = ga.evolve(p_cong=0.9)
+        assert len(paths) > 0
+
+
+# ── Ant Colony Optimization Tests ────────────────────────────────────────────
+
+class TestACO:
+
+    def test_aco_refine(self, grid_graph):
+        ga  = GeneticAlgorithm(grid_graph, source=0, target=24, seed=42,
+                                population_size=10, generations=5)
+        c_ga = ga.evolve()
+        aco  = AntColonyOptimization(grid_graph, num_ants=5, seed=42)
+        c_star = aco.refine(c_ga, source=0, target=24, p_cong=0.3, iterations=3)
+        assert len(c_star) > 0
+
+    def test_pheromone_initialized(self, grid_graph):
+        aco = AntColonyOptimization(grid_graph, seed=42)
+        assert len(aco.pheromone) == len(list(grid_graph.edges()))
+        for val in aco.pheromone.values():
+            assert val == pytest.approx(1.0)
+
+    def test_pheromone_updates_after_path(self, grid_graph):
+        aco    = AntColonyOptimization(grid_graph, seed=42)
+        path   = get_all_paths(grid_graph, 0, 24, cutoff=4)
+        before = dict(aco.pheromone)
+        aco._pheromone_update([path[0]], p_cong=0.5)
+        assert aco.pheromone != before
+
+
+# ── Q-Learning Agent Tests ────────────────────────────────────────────────────
+
+class TestQAgent:
+
+    def test_agent_created(self, grid_graph):
+        agent = QAgent(node_id=0, G=grid_graph, seed=42)
+        assert agent.node_id == 0
+        assert len(agent.actions) > 0
+
+    def test_state_discretized(self, grid_graph):
+        agent = QAgent(node_id=0, G=grid_graph, seed=42)
+        state = agent.get_state()
+        assert len(state) == 4
+        assert all(0 <= s < agent.N_BINS for s in state)
+
+    def test_action_selection(self, grid_graph):
+        agent  = QAgent(node_id=0, G=grid_graph, seed=42)
+        state  = agent.get_state()
+        action = agent.select_action(state)
+        assert action in agent.actions
+
+    def test_q_update(self, grid_graph):
+        agent = QAgent(node_id=0, G=grid_graph, seed=42)
+        state = agent.get_state()
+        action = agent.actions[0]
+        agent.update(state, action, reward=1.0, next_state=state)
+        assert agent._get_q(state, action) != 0.0
+
+    def test_reward_computation(self, grid_graph):
+        agent  = QAgent(node_id=0, G=grid_graph, seed=42)
+        reward = agent.compute_reward(5.0, 10.0, delay=50.0, loss=0.05)
+        assert isinstance(reward, float)
+
+    def test_epsilon_decay(self, grid_graph):
+        agent   = QAgent(node_id=0, G=grid_graph, seed=42, epsilon=1.0)
+        state   = agent.get_state()
+        action  = agent.actions[0]
+        eps_before = agent.epsilon
+        agent.update(state, action, 1.0, state)
+        assert agent.epsilon < eps_before
+
+
+if __name__ == '__main__':
+    pytest.main([__file__, '-v'])
