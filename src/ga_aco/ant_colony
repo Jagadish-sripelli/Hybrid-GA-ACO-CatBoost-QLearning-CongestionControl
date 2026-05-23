@@ -1,0 +1,183 @@
+"""
+ant_colony.py
+-------------
+Ant Colony Optimization for pheromone-guided local path refinement.
+Implements Section 5.2 and Equation (5) of the paper.
+
+Pheromone update (Eq. 5):
+    τ_ij(t+1) = (1 − ρ) · τ_ij(t) + Δτ_ij
+"""
+
+import numpy as np
+import networkx as nx
+import random
+from typing import List
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from utils.network_graph import compute_path_qos
+
+
+class AntColonyOptimization:
+    """
+    ACO-based local path refinement with pheromone reinforcement.
+
+    Parameters
+    ----------
+    G : nx.DiGraph
+        Network graph with QoS edge attributes
+    num_ants : int
+    evaporation_rate : float
+        ρ in Eq. (5)
+    alpha : float
+        Pheromone importance exponent
+    beta : float
+        Heuristic importance exponent
+    q_constant : float
+        Pheromone deposit amount
+    seed : int
+    """
+
+    def __init__(self,
+                 G: nx.DiGraph,
+                 num_ants: int = 20,
+                 evaporation_rate: float = 0.3,
+                 alpha: float = 1.0,
+                 beta: float = 2.0,
+                 q_constant: float = 100.0,
+                 seed: int = 42):
+
+        self.G                = G
+        self.num_ants         = num_ants
+        self.evaporation_rate = evaporation_rate   # rho
+        self.alpha            = alpha
+        self.beta             = beta
+        self.q_constant       = q_constant
+        self.rng              = np.random.RandomState(seed)
+        random.seed(seed)
+
+        # Initialize pheromone matrix
+        self.pheromone = {}
+        for u, v in G.edges():
+            self.pheromone[(u, v)] = 1.0
+
+    def _heuristic(self, u: int, v: int) -> float:
+        """
+        Edge desirability: inverse of delay × loss probability.
+        Higher heuristic → better edge to traverse.
+        """
+        delay    = max(self.G[u][v]['delay'], 1e-9)
+        loss     = self.G[u][v]['loss_prob'] + 1e-9
+        queue    = self.G[u][v]['queue_occ'] + 1e-9
+        return 1.0 / (delay * loss * queue)
+
+    def _select_next_node(self, current: int, visited: set,
+                          target: int) -> int:
+        """
+        Probabilistic next-node selection based on pheromone + heuristic.
+        """
+        neighbors = [v for v in self.G.successors(current)
+                     if v not in visited]
+        if not neighbors:
+            return None
+        if target in neighbors:
+            return target
+
+        probs = []
+        for v in neighbors:
+            tau  = self.pheromone.get((current, v), 1.0) ** self.alpha
+            eta  = self._heuristic(current, v) ** self.beta
+            probs.append(tau * eta)
+
+        total = sum(probs)
+        if total == 0:
+            return random.choice(neighbors)
+
+        probs = [p / total for p in probs]
+        return self.rng.choice(neighbors, p=probs)
+
+    def _construct_path(self, source: int, target: int) -> list:
+        """Single ant path construction."""
+        path    = [source]
+        visited = {source}
+        current = source
+
+        while current != target and len(path) < len(self.G.nodes):
+            nxt = self._select_next_node(current, visited, target)
+            if nxt is None:
+                break
+            path.append(nxt)
+            visited.add(nxt)
+            current = nxt
+
+        return path if path[-1] == target else []
+
+    def _pheromone_update(self, ant_paths: list, p_cong: float = 0.0):
+        """
+        Update pheromone matrix using Eq. (5):
+            τ_ij(t+1) = (1 − ρ) · τ_ij(t) + Δτ_ij
+
+        P_cong modifies reinforcement intensity (Section 5.3):
+        Higher congestion → stronger pheromone on low-congestion paths.
+        """
+        # Evaporation
+        for key in self.pheromone:
+            self.pheromone[key] *= (1 - self.evaporation_rate)
+
+        # Deposit
+        for path in ant_paths:
+            if len(path) < 2:
+                continue
+            qos     = compute_path_qos(self.G, path)
+            quality = 1.0 / (qos.get('delay', 1.0) + 1e-9)
+
+            # P_cong weighting: reward congestion-free paths more
+            cong_factor = 1.0 + p_cong if (1.0 - qos.get('queue_occ', 0)) > 0.5 else 1.0
+
+            delta_tau = (self.q_constant * quality * cong_factor) / len(path)
+
+            for i in range(len(path) - 1):
+                u, v = path[i], path[i + 1]
+                if (u, v) in self.pheromone:
+                    self.pheromone[(u, v)] += delta_tau
+
+    def refine(self,
+               candidate_paths: List[list],
+               source: int,
+               target: int,
+               p_cong: float = 0.0,
+               iterations: int = 10) -> List[list]:
+        """
+        Refine GA candidate paths using ACO pheromone reinforcement.
+
+        Parameters
+        ----------
+        candidate_paths : list
+            C_GA from Genetic Algorithm
+        source : int
+        target : int
+        p_cong : float
+            CatBoost-predicted congestion probability
+        iterations : int
+            Number of ACO refinement iterations
+
+        Returns
+        -------
+        List of refined candidate paths (C*)
+        """
+        # Seed pheromone with GA paths
+        for path in candidate_paths:
+            self._pheromone_update([path], p_cong)
+
+        for _ in range(iterations):
+            ant_paths = []
+            for _ in range(self.num_ants):
+                path = self._construct_path(source, target)
+                if path:
+                    ant_paths.append(path)
+            self._pheromone_update(ant_paths, p_cong)
+
+        # Collect all valid paths found
+        all_paths = candidate_paths + [p for p in ant_paths if p]
+        unique    = list({tuple(p): p for p in all_paths if len(p) >= 2}.values())
+        return unique[:10]  # return top 10 candidates
